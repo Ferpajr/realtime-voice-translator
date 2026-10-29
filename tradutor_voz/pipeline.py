@@ -16,10 +16,10 @@ Tipos de evento:
     som          {}                           primeiro som detectado
     sem_som      {mensagem}                   nenhum som chegou após alguns segundos
     nivel        {valor, limiar}              volume atual (10x por segundo, p/ medidor)
-    original     {texto, idioma, confianca, mantido}
+    original     {texto, idioma, confianca, mantido, partes}   partes>1: trechos juntados
     ignorado     {motivo, texto}
     traducao     {texto, original, idioma}
-    metricas     {fila, whisper, traducao, voz, atrasado}
+    metricas     {fila, whisper, traducao, voz, atrasado, partes}
     latencia     {total, espera}              do fim da fala ao início da voz
 """
 
@@ -32,7 +32,8 @@ import numpy as np
 
 from .config import Config
 from .segmentacao import Segmentador, volume_rms
-from .texto import dividir_frases, eh_alucinacao, nomes_parecidos
+from .texto import (IDIOMAS_SEM_ESPACO, dividir_frases, eh_alucinacao, nomes_parecidos,
+                    termina_frase)
 
 
 class Pipeline:
@@ -216,86 +217,143 @@ class Pipeline:
                                                    "fila (o processamento está atrasando)")
 
     def _laco_trabalho(self):
-        cfg = self.cfg
-        ultimo_texto, ultimo_tempo = None, 0.0
-        ultimo_idioma, tempo_idioma = None, 0.0
+        """Transcreve cada trecho, junta frases incompletas e manda traduzir."""
+        estado = {"ultimo_texto": None, "ultimo_tempo": 0.0,
+                  "ultimo_idioma": None, "tempo_idioma": 0.0}
+        pendente = None   # frase sem final, esperando a continuação
 
         while not self._parar.is_set():
+            espera = 0.2
+            if pendente is not None:
+                espera = max(0.01, min(0.2, pendente["prazo"] - time.time()))
             try:
-                audio, fim_da_fala = self.fila_frases.get(timeout=0.2)
+                audio, fim_da_fala = self.fila_frases.get(timeout=espera)
             except queue.Empty:
+                # a continuação não veio a tempo: traduz o que tem
+                if pendente is not None and time.time() >= pendente["prazo"]:
+                    self._finalizar_trecho(pendente)
+                    pendente = None
                 continue
             try:
-                contexto = (ultimo_texto[-200:]
-                            if cfg.usar_contexto and ultimo_texto
-                            and time.time() - ultimo_tempo < 15 else None)
-
-                t_inicio = time.time()
-                texto, idioma, confianca = self.transcritor.transcrever(audio, contexto)
-                if not texto:
+                trecho = self._transcrever_trecho(audio, fim_da_fala, estado, pendente)
+                if trecho is None:
                     continue
-
-                # Fala curta com dúvida no idioma: mantém o idioma da conversa
-                mantido = False
-                if (confianca < cfg.confianca_minima and ultimo_idioma
-                        and time.time() - tempo_idioma < cfg.manter_idioma_seg):
-                    if idioma != ultimo_idioma:
-                        texto, _, _ = self.transcritor.transcrever(audio, contexto,
-                                                                   idioma=ultimo_idioma)
-                    idioma, mantido = ultimo_idioma, True
-                t_whisper = time.time()
-
-                if not texto:
+                if pendente is not None:
+                    if trecho["idioma"] == pendente["idioma"]:
+                        trecho = self._juntar_trechos(pendente, trecho)
+                    else:
+                        self._finalizar_trecho(pendente)
+                    pendente = None
+                if self._deve_esperar_continuacao(trecho):
+                    trecho["prazo"] = time.time() + self.cfg.espera_fim_frase
+                    pendente = trecho
                     continue
-                if eh_alucinacao(texto):
-                    self._emitir("ignorado", motivo="alucinacao", texto=texto)
-                    continue
-                if confianca < cfg.confianca_minima and not mantido:
-                    self._emitir("ignorado", motivo="confianca", texto=texto)
-                    continue
-
-                ultimo_texto, ultimo_tempo = texto, time.time()
-                ultimo_idioma, tempo_idioma = idioma, time.time()
-                self._emitir("original", texto=texto, idioma=idioma,
-                             confianca=confianca, mantido=mantido)
-
-                if idioma == cfg.idioma_destino:
-                    self._emitir("ignorado", motivo="mesmo_idioma", texto=texto)
-                    continue
-
-                traducao = self.tradutor.traduzir(texto, idioma)
-                t_traducao = time.time()
-                if not traducao:
-                    self._emitir("aviso", mensagem="Nenhum tradutor respondeu.")
-                    continue
-                self._emitir("traducao", texto=traducao, original=texto, idioma=idioma)
-
-                atrasado = self.fila_falas.qsize() >= 1 or self.fila_frases.qsize() >= 1
-                if not cfg.falar_traducao:
-                    self._emitir("metricas", fila=t_inicio - fim_da_fala,
-                                 whisper=t_whisper - t_inicio,
-                                 traducao=t_traducao - t_whisper, voz=0.0, atrasado=False)
-                    continue
-
-                # Voz frase a frase: a 1ª já toca enquanto as outras são geradas
-                for i, frase in enumerate(dividir_frases(traducao)):
-                    if self._parar.is_set():
-                        break
-                    try:
-                        caminho = self.voz.gerar(frase, atrasado)
-                    except Exception as erro:
-                        self._emitir("aviso", mensagem=f"Não consegui gerar a voz "
-                                                       f"({type(erro).__name__}).")
-                        continue
-                    if i == 0:
-                        self._emitir("metricas", fila=t_inicio - fim_da_fala,
-                                     whisper=t_whisper - t_inicio,
-                                     traducao=t_traducao - t_whisper,
-                                     voz=time.time() - t_traducao, atrasado=atrasado)
-                    self.fila_falas.put((caminho, fim_da_fala if i == 0 else None, time.time()))
+                self._finalizar_trecho(trecho)
             except Exception as erro:
                 self._emitir("aviso", mensagem=f"Erro ao processar uma frase: "
                                                f"{type(erro).__name__}: {erro}")
+
+    def _transcrever_trecho(self, audio, fim_da_fala, estado, pendente):
+        """Whisper + filtros. Devolve um dict com o trecho ou None se for descartado."""
+        cfg = self.cfg
+        if pendente is not None:
+            contexto = pendente["texto"][-200:]       # continuação da frase pendente
+        elif (cfg.usar_contexto and estado["ultimo_texto"]
+              and time.time() - estado["ultimo_tempo"] < 15):
+            contexto = estado["ultimo_texto"][-200:]
+        else:
+            contexto = None
+
+        t_inicio = time.time()
+        texto, idioma, confianca = self.transcritor.transcrever(audio, contexto)
+        if not texto:
+            return None
+
+        # Fala curta com dúvida no idioma: mantém o idioma da conversa
+        mantido = False
+        ultimo_idioma = estado["ultimo_idioma"]
+        if (confianca < cfg.confianca_minima and ultimo_idioma
+                and time.time() - estado["tempo_idioma"] < cfg.manter_idioma_seg):
+            if idioma != ultimo_idioma:
+                texto, _, _ = self.transcritor.transcrever(audio, contexto, idioma=ultimo_idioma)
+            idioma, mantido = ultimo_idioma, True
+        t_whisper = time.time()
+
+        if not texto:
+            return None
+        if eh_alucinacao(texto):
+            self._emitir("ignorado", motivo="alucinacao", texto=texto)
+            return None
+        if confianca < cfg.confianca_minima and not mantido:
+            self._emitir("ignorado", motivo="confianca", texto=texto)
+            return None
+
+        estado.update(ultimo_texto=texto, ultimo_tempo=time.time(),
+                      ultimo_idioma=idioma, tempo_idioma=time.time())
+        return {"texto": texto, "idioma": idioma, "confianca": confianca, "mantido": mantido,
+                "fim_da_fala": fim_da_fala, "t_inicio": t_inicio, "t_whisper": t_whisper,
+                "partes": 1}
+
+    @staticmethod
+    def _juntar_trechos(anterior, novo):
+        junto = dict(novo)
+        junto["texto"] = f"{anterior['texto']} {novo['texto']}"
+        junto["confianca"] = max(anterior["confianca"], novo["confianca"])
+        junto["mantido"] = anterior["mantido"] and novo["mantido"]
+        junto["partes"] = anterior["partes"] + novo["partes"]
+        return junto
+
+    def _deve_esperar_continuacao(self, trecho) -> bool:
+        """Frase sem pontuação final provavelmente foi cortada numa pausa:
+        vale esperar um pouco pela continuação para traduzir a frase inteira."""
+        cfg = self.cfg
+        return (cfg.juntar_frases
+                and trecho["idioma"] != cfg.idioma_destino
+                and trecho["idioma"] not in IDIOMAS_SEM_ESPACO   # Whisper quase não pontua
+                and len(trecho["texto"]) < cfg.max_caracteres_juntar
+                and not termina_frase(trecho["texto"]))
+
+    def _finalizar_trecho(self, trecho):
+        """Emite o original, traduz e gera a voz."""
+        cfg = self.cfg
+        texto, idioma = trecho["texto"], trecho["idioma"]
+        self._emitir("original", texto=texto, idioma=idioma, confianca=trecho["confianca"],
+                     mantido=trecho["mantido"], partes=trecho["partes"])
+
+        if idioma == cfg.idioma_destino:
+            self._emitir("ignorado", motivo="mesmo_idioma", texto=texto)
+            return
+
+        traducao = self.tradutor.traduzir(texto, idioma)
+        t_traducao = time.time()
+        if not traducao:
+            self._emitir("aviso", mensagem="Nenhum tradutor respondeu.")
+            return
+        self._emitir("traducao", texto=traducao, original=texto, idioma=idioma)
+
+        metricas = dict(fila=trecho["t_inicio"] - trecho["fim_da_fala"],
+                        whisper=trecho["t_whisper"] - trecho["t_inicio"],
+                        traducao=t_traducao - trecho["t_whisper"], partes=trecho["partes"])
+        atrasado = self.fila_falas.qsize() >= 1 or self.fila_frases.qsize() >= 1
+        if not cfg.falar_traducao:
+            self._emitir("metricas", voz=0.0, atrasado=False, **metricas)
+            return
+
+        # Voz frase a frase: a 1ª já toca enquanto as outras são geradas
+        for i, frase in enumerate(dividir_frases(traducao)):
+            if self._parar.is_set():
+                break
+            try:
+                caminho = self.voz.gerar(frase, atrasado)
+            except Exception as erro:
+                self._emitir("aviso", mensagem=f"Não consegui gerar a voz "
+                                               f"({type(erro).__name__}).")
+                continue
+            if i == 0:
+                self._emitir("metricas", voz=time.time() - t_traducao, atrasado=atrasado,
+                             **metricas)
+            self.fila_falas.put((caminho, trecho["fim_da_fala"] if i == 0 else None,
+                                 time.time()))
 
     def _laco_fala(self):
         while not self._parar.is_set():

@@ -612,6 +612,8 @@ class JanelaPrincipal(QMainWindow):
             self._ultimo_original = d["texto"]
             idioma = nome_idioma(d["idioma"])
             confianca = "idioma mantido" if d["mantido"] else f"{d['confianca']:.0%}"
+            if d.get("partes", 1) > 1:
+                confianca += f", {d['partes']} trechos juntados"
             self._adicionar(
                 f'<div style="margin-top:10px; color:{SECUNDARIO}; font-size:12px;">'
                 f'{idioma}, {confianca}</div>'

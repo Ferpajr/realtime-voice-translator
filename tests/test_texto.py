@@ -1,7 +1,7 @@
 import pytest
 
 from tradutor_voz.texto import (dividir_frases, dividir_frases_cjk, dividir_para_traducao,
-                                eh_alucinacao, nomes_parecidos, para_pt_br)
+                                eh_alucinacao, nomes_parecidos, para_pt_br, termina_frase)
 
 
 # ---------------- Português de Portugal -> Brasil ----------------
@@ -92,6 +92,22 @@ def test_dividir_frases_cjk_separa_por_pontuacao_japonesa():
 def test_dividir_para_traducao_escolhe_pelo_idioma():
     assert dividir_para_traducao("はい いいえ", "ja") == ["はいいいえ"]   # trechos curtos juntos
     assert dividir_para_traducao("Yes. No.", "en") == ["Yes. No."]
+
+
+# ---------------- Fim de frase ----------------
+
+@pytest.mark.parametrize("texto, esperado", [
+    ("They win $250,000!", True),
+    ("Is that right?", True),
+    ('He said "stop."', True),
+    ("こんにちは。", True),
+    ("Lots of kids in this area are trapped in illegal child", False),
+    ("This field into a literal city starting with a", False),
+    ("On front of you, you are...", False),       # reticências: fala interrompida
+    ("Starting with a…", False),
+])
+def test_termina_frase(texto, esperado):
+    assert termina_frase(texto) is esperado
 
 
 # ---------------- Nomes de dispositivos ----------------

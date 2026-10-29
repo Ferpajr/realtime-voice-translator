@@ -59,6 +59,8 @@ def mostrar_evento(tipo: str, d: dict):
         log(f"🔇 {d['mensagem']}\n")
     elif tipo == "original":
         rotulo = "mantido" if d["mantido"] else f"{d['confianca']:.0%}"
+        if d.get("partes", 1) > 1:
+            rotulo += f" - {d['partes']} trechos juntados"
         log(f"🌐 [{nome_idioma(d['idioma'])} - {rotulo}] {d['texto']}")
     elif tipo == "ignorado":
         motivos = {"alucinacao": "👻 Ignorado (inventado pelo Whisper)",

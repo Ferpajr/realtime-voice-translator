@@ -140,10 +140,42 @@ def test_fala_curta_incerta_mantem_o_idioma_da_conversa():
 
 
 def test_frase_anterior_vira_contexto():
-    respostas = [("First part of the sentence", "en", 0.99), ("and the end.", "en", 0.99)]
+    respostas = [("We pour the concrete.", "en", 0.99), ("Then we build the walls.", "en", 0.99)]
     _, transcritor, _, _ = rodar(respostas, [2, 1], esperar_eventos=2)
     assert transcritor.chamadas[0]["contexto"] is None
-    assert transcritor.chamadas[1]["contexto"] == "First part of the sentence"
+    assert transcritor.chamadas[1]["contexto"] == "We pour the concrete."
+
+
+def test_frase_cortada_numa_pausa_e_juntada_antes_de_traduzir():
+    # Caso real: o narrador fez uma pausa antes de "labor". Traduzir o pedaço
+    # "...illegal child" sozinho virou "presas em crianças ilegais".
+    respostas = [("Lots of kids in this area are trapped in illegal child", "en", 0.99),
+                 ("labor.", "en", 0.95)]
+    eventos, transcritor, voz, _ = rodar(respostas, [2.5, 0.8])
+    traducoes = [d["texto"] for t, d in eventos if t == "traducao"]
+    assert traducoes == ["[pt] Lots of kids in this area are trapped in illegal child labor."]
+    originais = [d for t, d in eventos if t == "original"]
+    assert originais[0]["partes"] == 2
+    # o pedaço pendente foi passado como contexto para o Whisper
+    assert transcritor.chamadas[1]["contexto"] == (
+        "Lots of kids in this area are trapped in illegal child")
+
+
+def test_frase_sem_final_e_traduzida_se_a_continuacao_nao_vier():
+    cfg = Config(aviso_sem_som_seg=999, espera_fim_frase=0.3)
+    eventos, _, _, _ = rodar([("We're gonna turn this field into a literal city", "en", 0.99)],
+                             [2], cfg=cfg)
+    assert [d["texto"] for t, d in eventos if t == "traducao"] == [
+        "[pt] We're gonna turn this field into a literal city"]
+
+
+def test_japones_nao_espera_pontuacao():
+    # O Whisper quase não pontua japonês: esperar só atrasaria cada fala
+    cfg = Config(aviso_sem_som_seg=999, espera_fim_frase=10)
+    inicio = time.time()
+    eventos, _, _, _ = rodar([("私の名前は西村じゃない", "ja", 0.98)], [2], cfg=cfg)
+    assert "traducao" in tipos(eventos)
+    assert time.time() - inicio < 5
 
 
 def test_modo_so_legendas_nao_gera_voz():

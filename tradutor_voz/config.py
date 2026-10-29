@@ -38,6 +38,9 @@ class Config:
     usar_contexto: bool = True                 # passa a frase anterior ao Whisper
     confianca_minima: float = 0.7              # confiança mínima na detecção de idioma
     manter_idioma_seg: float = 30              # em dúvida, mantém o idioma dos últimos X s
+    juntar_frases: bool = True                 # junta trechos cortados no meio da frase
+    espera_fim_frase: float = 1.2              # quanto esperar pela continuação (s)
+    max_caracteres_juntar: int = 320           # acima disso, traduz mesmo sem o final
 
     # ---------------- Áudio e separação de frases ----------------
     taxa_amostragem: int = 16000               # o Whisper trabalha com 16 kHz

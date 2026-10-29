@@ -27,6 +27,17 @@ def eh_alucinacao(texto: str) -> bool:
 
 IDIOMAS_SEM_ESPACO = ("ja", "zh")
 
+_FIM_DE_FRASE = re.compile(r"[.!?。！？][\"'”’»)\]]*$")
+
+
+def termina_frase(texto: str) -> bool:
+    """True se o texto termina com pontuação de fim de frase.
+    Reticências ('...', '…') indicam fala interrompida: não contam como fim."""
+    t = texto.strip()
+    if t.endswith(("...", "…")):
+        return False
+    return bool(_FIM_DE_FRASE.search(t))
+
 
 def dividir_frases(texto: str):
     """Quebra o texto em frases pela pontuação, juntando pedaços muito curtos."""

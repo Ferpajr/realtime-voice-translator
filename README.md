@@ -27,7 +27,7 @@ A Windows desktop app that captures system audio (Zoom, Teams, Google Meet, YouT
 - **Hardware-aware** — uses the GPU when an NVIDIA card is available, falls back to a lighter CPU profile otherwise
 - **Desktop GUI** with live signal meter and floating subtitles, plus a terminal version
 - **Crash-isolated** — the AI engine runs in its own process; if it ever fails, the window stays open and offers a restart
-- **Tested** — 51 automated tests run on every push (GitHub Actions), no models or audio hardware needed
+- **Tested** — 62 automated tests run on every push (GitHub Actions), no models or audio hardware needed
 
 ## 🏗️ Architecture
 
@@ -86,6 +86,7 @@ Time from the **end of a spoken sentence** to the **start of the translated audi
 - **Echo loop** — when capture and playback share a device, the translator would hear its own voice. Capture is gated while translated speech plays, and the GUI warns when the devices match; routing them to different outputs removes the trade-off.
 - **Whisper hallucinations** — on music or silence Whisper invents phrases like *"Thanks for watching!"*. A phrase filter plus a language-confidence threshold drops them.
 - **Short utterances** — one-word interjections get low language confidence. When in doubt, the transcriber re-decodes using the language of the ongoing conversation.
+- **Sentences split at a pause** — a speaker pausing mid-sentence (*"trapped in illegal child … labor"*) produced a fragment the translator guessed wrong. Transcripts without final punctuation now wait up to 1.2 s for the continuation and are translated as one sentence.
 - **Context loss in long speech** — instead of a hard cut at N seconds, the segmenter cuts at the quietest point in the last 3 s and carries the remainder forward.
 - **Clicks and pops** — a short noise followed by silence used to become an "utterance"; segments now require a minimum amount of actual speech (caught by the test suite).
 - **Backlog** — continuous speech can outpace playback; speech rate increases automatically when translations queue up.
