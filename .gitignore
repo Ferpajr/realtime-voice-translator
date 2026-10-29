@@ -1,0 +1,22 @@
+# Ambiente virtual
+venv/
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Modelos e áudios gerados (baixados automaticamente na 1ª execução)
+vozes/
+*.onnx
+*.onnx.json
+*.wav
+*.mp3
+*.parcial
+
+# Editores e sistema
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store

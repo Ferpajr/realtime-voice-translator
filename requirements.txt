@@ -1,0 +1,10 @@
+faster-whisper
+sounddevice
+numpy
+deep-translator
+edge-tts
+pygame
+requests
+soundcard>=0.4.3
+piper-tts
+sentencepiece
