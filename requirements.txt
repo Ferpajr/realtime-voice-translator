@@ -1,10 +1,11 @@
 faster-whisper
 sounddevice
 numpy
-deep-translator
-edge-tts
-pygame
-requests
 soundcard>=0.4.3
+pygame
+PySide6-Essentials   # só os módulos usados (sem o navegador embutido de ~130 MB)
 piper-tts
 sentencepiece
+requests
+edge-tts
+deep-translator

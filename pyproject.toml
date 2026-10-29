@@ -1,0 +1,9 @@
+[project]
+name = "tradutor-voz"
+version = "0.8.0"
+description = "Real-time speech translation in your headphones, 100% local (Whisper + NLLB + Piper)"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

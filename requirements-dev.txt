@@ -1,0 +1,3 @@
+# Só o necessário para rodar os testes (sem modelos, placa de som ou GPU)
+numpy
+pytest

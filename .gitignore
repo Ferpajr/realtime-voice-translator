@@ -20,3 +20,6 @@ vozes/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# Testes
+.pytest_cache/
