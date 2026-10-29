@@ -26,7 +26,8 @@ A Windows desktop app that captures system audio (Zoom, Teams, Google Meet, YouT
 - **Fully local pipeline** — no API keys, no cloud, no per-minute costs
 - **Hardware-aware** — uses the GPU when an NVIDIA card is available, falls back to a lighter CPU profile otherwise
 - **Desktop GUI** with live signal meter and floating subtitles, plus a terminal version
-- **Tested** — 41 automated tests run on every push (GitHub Actions), no models or audio hardware needed
+- **Crash-isolated** — the AI engine runs in its own process; if it ever fails, the window stays open and offers a restart
+- **Tested** — 51 automated tests run on every push (GitHub Actions), no models or audio hardware needed
 
 ## 🏗️ Architecture
 
@@ -43,10 +44,13 @@ flowchart LR
 
 Capture, segmentation, processing and playback run in separate threads connected by queues, so listening never stops while a translation is playing. The `Pipeline` reports everything through events (`original`, `traducao`, `metricas`, `nivel`…), so the GUI and the terminal app are thin layers over the same core. Components are injected, which lets the whole flow be tested with fakes.
 
+In the desktop app the engine runs in a **separate process** (`python -m tradutor_voz.processo`) and talks to the window through JSON lines over stdin/stdout. Qt and the AI libraries (CTranslate2, SentencePiece, ONNX Runtime) each ship their own Visual C++ runtime DLLs; in a single process they caused random access violations on Windows. Process isolation removed the crash entirely and means an engine failure can never take the window down.
+
 ```
 tradutor_voz/
 ├── config.py        all settings (dataclass)
 ├── pipeline.py      threads, queues and events — the core
+├── processo.py      runs the engine in its own process (JSON over stdin/stdout)
 ├── captura.py       device listing, microphone and loopback capture
 ├── segmentacao.py   speech segmentation (pure, testable)
 ├── transcricao.py   faster-whisper, GPU/CPU profile
@@ -85,6 +89,7 @@ Time from the **end of a spoken sentence** to the **start of the translated audi
 - **Context loss in long speech** — instead of a hard cut at N seconds, the segmenter cuts at the quietest point in the last 3 s and carries the remainder forward.
 - **Clicks and pops** — a short noise followed by silence used to become an "utterance"; segments now require a minimum amount of actual speech (caught by the test suite).
 - **Backlog** — continuous speech can outpace playback; speech rate increases automatically when translations queue up.
+- **Native crashes between Qt and the AI stack** — `faulthandler` traced an access violation to Qt rendering text while SentencePiece encoded in another thread; moving the engine to its own process fixed it, and the GUI now detects an engine crash and offers a restart.
 - **Windows quirks** — loopback delivers no frames during silence; COM is initialized per capture thread so it coexists with Qt; eSpeak fails on non-ASCII paths (data copied to an ASCII-only folder and validated in a subprocess so a native crash can't take down the app); CUDA DLLs are loaded from pip-installed NVIDIA wheels, no CUDA toolkit needed.
 - **European vs. Brazilian Portuguese** — NLLB outputs mostly European Portuguese; a rule-based post-processor converts common constructions (*"lembro-me" → "me lembro"*, *"está a fazer" → "está fazendo"*, *"telemóvel" → "celular"*).
 

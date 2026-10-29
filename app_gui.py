@@ -3,9 +3,17 @@
 Uso: python app_gui.py
 """
 
+import faulthandler
 import html
 import sys
 import threading
+
+# Se algo travar dentro de uma biblioteca em C/C++, mostra onde foi no terminal
+faulthandler.enable()
+
+# Importante: este processo (a janela) NÃO carrega as bibliotecas de IA.
+# Elas rodam em outro processo (tradutor_voz/processo.py), porque no mesmo
+# processo que o Qt as DLLs do Visual C++ de cada lado entram em conflito.
 
 from PySide6.QtCore import QObject, QPoint, QRectF, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath
@@ -234,6 +242,8 @@ class JanelaPrincipal(QMainWindow):
     MAX_ITENS = 60
 
     def __init__(self, pipeline=None, cfg: Config = None):
+        """pipeline=None (normal): o motor de IA roda em outro processo.
+        pipeline=<Pipeline>: roda nesta mesma janela, em threads (usado nos testes)."""
         super().__init__()
         self.cfg = cfg or Config()
         self.configuracoes = QSettings("TradutorVoz", "TradutorVoz")
@@ -241,15 +251,21 @@ class JanelaPrincipal(QMainWindow):
 
         self.ponte = Ponte()
         self.ponte.evento.connect(self._ao_evento)
-        if pipeline is None:
-            from tradutor_voz.pipeline import Pipeline
-            pipeline = Pipeline(self.cfg, ao_evento=lambda t, d: self.ponte.evento.emit(t, d))
         self.pipeline = pipeline
+        self.motor = None
+        if pipeline is None:
+            self._criar_motor()
+            # busca os eventos do motor ~30 vezes por segundo
+            self._coletor = QTimer(self, interval=33)
+            self._coletor.timeout.connect(self._coletar_eventos_do_motor)
+            self._coletor.start()
+        else:
+            pipeline._ao_evento = lambda t, d: self.ponte.evento.emit(t, d)
 
+        self.motor_caiu = False
         self.modelos_prontos = False
         self.rodando = False
         self.estado_texto = None
-        self.itens = []
         self._ultimo_original = ""
 
         self.legenda = LegendaFlutuante(self.configuracoes)
@@ -440,6 +456,8 @@ class JanelaPrincipal(QMainWindow):
 
     def _ao_mudar_falar(self, ligado: bool):
         self.cfg.falar_traducao = ligado
+        if self.motor is not None:
+            self.motor.definir("falar_traducao", ligado)   # vale na hora, mesmo rodando
         self.configuracoes.setValue("falar", ligado)
         self.combo_saida.setEnabled(ligado and not self.rodando)
         self._verificar_eco()
@@ -453,10 +471,25 @@ class JanelaPrincipal(QMainWindow):
 
     # ---------- iniciar / parar ----------
 
+    # ---------- motor de IA (processo separado) ----------
+
+    def _criar_motor(self):
+        from tradutor_voz.processo import MotorEmProcesso
+        self.motor = MotorEmProcesso(self.cfg)
+
+    def _coletar_eventos_do_motor(self):
+        if self.motor is None:
+            return
+        for tipo, dados in self.motor.coletar_eventos():
+            self._ao_evento(tipo, dados)
+
     def carregar_modelos(self):
         self.estado_texto = "Carregando modelos"
         self._atualizar_estado()
-        threading.Thread(target=self._carregar_em_segundo_plano, daemon=True).start()
+        if self.motor is not None:
+            self.motor.carregar()          # o outro processo avisa com "carregado"
+        else:
+            threading.Thread(target=self._carregar_em_segundo_plano, daemon=True).start()
 
     def _carregar_em_segundo_plano(self):
         try:
@@ -465,12 +498,25 @@ class JanelaPrincipal(QMainWindow):
             self.ponte.evento.emit("erro", {"mensagem": f"Falha ao carregar os modelos: "
                                                         f"{type(erro).__name__}: {erro}"})
 
+    def _reiniciar_motor(self):
+        self.motor_caiu = False
+        self.modelos_prontos = False
+        self.rodando = False
+        self._criar_motor()
+        self.carregar_modelos()
+
     def _iniciar_ou_parar(self):
+        if self.motor_caiu:
+            self._reiniciar_motor()
+            return
         self.botao.setEnabled(False)
         if self.rodando:
             self.estado_texto = "Parando"
             self._atualizar_estado()
-            threading.Thread(target=self.pipeline.parar, daemon=True).start()
+            if self.motor is not None:
+                self.motor.parar()
+            else:
+                threading.Thread(target=self.pipeline.parar, daemon=True).start()
             return
 
         fonte = self.combo_fonte.currentData()
@@ -488,6 +534,10 @@ class JanelaPrincipal(QMainWindow):
                              else "Iniciando")
         self._atualizar_estado()
 
+        if self.motor is not None:
+            self.motor.iniciar(fonte, dispositivo, saida)
+            return
+
         def iniciar():
             try:
                 self.pipeline.iniciar(fonte, dispositivo, saida)
@@ -499,6 +549,15 @@ class JanelaPrincipal(QMainWindow):
     # ---------- eventos do pipeline ----------
 
     def _ao_evento(self, tipo: str, d: dict):
+        # Também mostra o andamento no terminal (ajuda a diagnosticar problemas)
+        if tipo in ("status", "aviso", "erro"):
+            print(f"[{tipo}] {d['mensagem']}", flush=True)
+        elif tipo == "carregado":
+            print(f"[pronto] Reconhecimento: {d['whisper']} | Tradução: {d['traducao']} "
+                  f"| Voz: {d['voz']}", flush=True)
+        elif tipo in ("iniciado", "parado"):
+            print(f"[{tipo}]", flush=True)
+
         if tipo == "nivel":
             self.medidor.atualizar(d["valor"], d["limiar"])
         elif tipo == "status":
@@ -524,12 +583,25 @@ class JanelaPrincipal(QMainWindow):
             self.legenda.hide()
             self._atualizar_estado()
         elif tipo == "erro":
-            QMessageBox.warning(self, "Tradutor de voz", d["mensagem"])
             if self.rodando:
-                threading.Thread(target=self.pipeline.parar, daemon=True).start()
+                if self.motor is not None:
+                    self.motor.parar()
+                else:
+                    threading.Thread(target=self.pipeline.parar, daemon=True).start()
             else:
                 self.estado_texto = None
                 self._atualizar_estado()
+            QMessageBox.warning(self, "Tradutor de voz", d["mensagem"])
+        elif tipo == "motor_caiu":
+            print(f"[erro] {d['mensagem']}", flush=True)
+            self.motor_caiu = True
+            self.rodando = False
+            self.modelos_prontos = False
+            self.estado_texto = None
+            self.medidor.zerar()
+            self.legenda.hide()
+            self._atualizar_estado()
+            self._adicionar_nota(d["mensagem"])
         elif tipo in ("aviso", "sem_som"):
             self._adicionar_nota(d["mensagem"].lstrip("⚠️⏸️ "))
         elif tipo == "som":
@@ -568,14 +640,14 @@ class JanelaPrincipal(QMainWindow):
     def _limpar_vazio(self):
         if getattr(self, "_vazio", False):
             self.transcricao.clear()
-            self.itens = []
+            # mantém só as últimas linhas (o documento não cresce para sempre)
+            self.transcricao.document().setMaximumBlockCount(self.MAX_ITENS * 6)
             self._vazio = False
 
     def _adicionar(self, trecho_html: str):
+        """Acrescenta só o trecho novo (em vez de redesenhar o histórico todo)."""
         self._limpar_vazio()
-        self.itens.append(trecho_html)
-        self.itens = self.itens[-self.MAX_ITENS * 3:]
-        self.transcricao.setHtml("".join(self.itens))
+        self.transcricao.append(trecho_html)
         barra = self.transcricao.verticalScrollBar()
         barra.setValue(barra.maximum())
 
@@ -597,11 +669,17 @@ class JanelaPrincipal(QMainWindow):
             self.estado.setText(f'<span style="color:{SECUNDARIO};">Carregando modelos…</span>')
 
         ocupado = bool(texto_estado)
-        self.botao.setText("Parar tradução" if self.rodando else "Iniciar tradução")
-        self.botao.setProperty("aoVivo", self.rodando)
+        if getattr(self, "motor_caiu", False):
+            self.estado.setText(f'<span style="color:{AO_VIVO};">Motor parado</span>')
+            self.botao.setText("Reiniciar motor")
+            self.botao.setProperty("aoVivo", False)
+            self.botao.setEnabled(True)
+        else:
+            self.botao.setText("Parar tradução" if self.rodando else "Iniciar tradução")
+            self.botao.setProperty("aoVivo", self.rodando)
+            self.botao.setEnabled(self.modelos_prontos and not ocupado)
         self.botao.style().unpolish(self.botao)
         self.botao.style().polish(self.botao)
-        self.botao.setEnabled(self.modelos_prontos and not ocupado)
 
         travado = self.rodando or ocupado
         for w in (self.combo_fonte, self.combo_captura, self.botao_atualizar):
@@ -610,7 +688,9 @@ class JanelaPrincipal(QMainWindow):
 
     def closeEvent(self, evento):
         self.legenda.close()
-        if self.rodando:
+        if self.motor is not None:
+            self.motor.encerrar()
+        elif self.rodando:
             self.pipeline.parar()
         super().closeEvent(evento)
 
