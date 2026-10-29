@@ -27,7 +27,7 @@ A Windows desktop app that captures system audio (Zoom, Teams, Google Meet, YouT
 - **Hardware-aware** — uses the GPU when an NVIDIA card is available, falls back to a lighter CPU profile otherwise
 - **Desktop GUI** with live signal meter and floating subtitles, plus a terminal version
 - **Crash-isolated** — the AI engine runs in its own process; if it ever fails, the window stays open and offers a restart
-- **Tested** — 62 automated tests run on every push (GitHub Actions), no models or audio hardware needed
+- **Tested** — 64 automated tests run on every push (GitHub Actions), no models or audio hardware needed
 
 ## 🏗️ Architecture
 

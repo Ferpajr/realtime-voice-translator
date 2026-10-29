@@ -62,9 +62,20 @@ def capturar_microfone(indice: int, cfg: Config, ao_bloco, parar: threading.Even
 
 # ---------------- Áudio do PC (loopback) ----------------
 
+def _carregar_soundcard():
+    """Importa a biblioteca de loopback.
+
+    ATENÇÃO à ordem: ao ser importada pela 1ª vez, ela mesma inicia o COM na
+    thread atual e trata o retorno "já iniciado" (S_FALSE, erro 0x100000001)
+    como falha. Por isso ela tem que ser importada ANTES de _inicializar_com_na_thread().
+    """
+    import soundcard as sc
+    return sc
+
+
 def _inicializar_com_na_thread():
-    """O loopback do Windows usa COM, que precisa ser iniciado em cada thread.
-    (Se já estiver iniciado em outro modo, o erro é ignorado.)"""
+    """O loopback do Windows usa COM, que precisa ser iniciado em cada thread
+    que grava. Se já estiver iniciado, o Windows só devolve S_FALSE (ignorado)."""
     if os.name == "nt":
         try:
             import ctypes
@@ -92,8 +103,8 @@ def nome_saida_padrao() -> str:
 def capturar_audio_pc(nome_saida: str, cfg: Config, ao_bloco, parar: threading.Event):
     """Captura o que está tocando na saída 'nome_saida' até 'parar' ser sinalizado.
     Em silêncio, a biblioteca devolve zeros (não trava)."""
-    _inicializar_com_na_thread()
-    import soundcard as sc
+    sc = _carregar_soundcard()       # primeiro a biblioteca...
+    _inicializar_com_na_thread()     # ...depois o COM desta thread (a ordem importa)
 
     warnings.filterwarnings("ignore", message=".*discontinuity.*")
     loopback = sc.get_microphone(id=str(nome_saida), include_loopback=True)
